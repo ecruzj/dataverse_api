@@ -12,19 +12,136 @@ from rich.text import Text
 from src.dataverse_apis.core.logging.logging_conf import get_logger
 from src.dataverse_apis.features.account.account_operations import (
     deactivate_account_with_note,
+    get_account_id_by_bus_id,
     reactivate_account_and_delete_note
 )
-from ..fetch_accounts import (
-    get_account_id_by_bus_id,
-    get_column_name,
-)
 
+DfLike = Union[pd.DataFrame, str, Path]
 logger = get_logger(__name__)
 
 DEFAULT_ACCOUNT_ID_COLUMN = "account_id"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 DEFAULT_OUTPUT_PATH = DEFAULT_DATA_DIR / "deactivated_accounts_results.xlsx"
 DEFAULT_REACTIVATION_OUTPUT_NAME = "reactivated_accounts_results.xlsx"
+
+# Helpers
+
+def _handle_expired_token(
+    resp: Dict[str, Any],
+    bus_id_value: Optional[str],
+    pbar: "tqdm",
+    console: Console,
+) -> bool:
+    """
+    Check if the response indicates token expired (401) and
+    if so, display the message and stop the process.
+    """
+    status_code = resp.get("status_code")
+    error_msg = str(resp.get("error") or "")
+    
+    if status_code == 401 or "401" in error_msg:
+        pbar.set_postfix({"BUS ID": bus_id_value or "N/A", "status": "❌ TOKEN EXPIRED"})
+        pbar.close()
+        console.print(
+            Text(f"[STOPPED] Token expired at BUS ID: {bus_id_value}", style="bold red")
+        )
+        return True
+
+    return False
+
+def _append_result_and_handle_token(
+    results: List[Dict[str, Any]],
+    resp: Dict[str, Any],
+    bus_id_value: Optional[str],
+    pbar: "tqdm",
+    console: Console,
+) -> bool:
+    results.append({
+        "bus_id": bus_id_value,
+        **resp,
+    })
+
+    return _handle_expired_token(resp, bus_id_value, pbar, console)
+
+def _save_results_with_logging(
+    results_df: pd.DataFrame,
+    output_path: Optional[Path],
+    default_output_path: Path,
+    start_time: datetime,
+    task_name: str,
+    logger=None,
+) -> pd.DataFrame:
+    """
+    Save results DataFrame to Excel, ensuring paths are correct,
+    creating directories if needed, and logging execution time.
+
+    Parameters:
+        results_df: DataFrame containing the final results
+        output_path: User-provided path or None
+        default_output_path: Path used when output_path is None
+        start_time: datetime when the task started
+        task_name: name of the caller (e.g., 'call_deactivate_accounts')
+        logger: logger instance (optional but expected)
+
+    Returns:
+        The same results_df for chaining or returning.
+    """
+
+    # Determine final path
+    if output_path is None:
+        final_path = default_output_path
+    else:
+        final_path = Path(output_path)
+        if not final_path.is_absolute():
+            final_path = default_output_path.parent / final_path.name
+
+    # Ensure directory exists
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save Excel
+    results_df.to_excel(final_path, index=False)
+
+    # Compute duration
+    end_time = datetime.now()
+    duration_sec = (end_time - start_time).total_seconds()
+
+    if logger:
+        logger.info(
+            "%s finished at %s (duration: %.2f seconds). Saved results to: %s",
+            task_name,
+            end_time.isoformat(timespec="seconds"),
+            duration_sec,
+            final_path,
+        )
+
+    return results_df
+
+def _build_ids_output_path(
+        df: DfLike,
+        data_dir_path: Path,
+        suffix: str = "_with_ids",
+    ) -> Optional[Path]:
+    """
+    Given the original `df` argument and the `data_dir_path` already resolved,
+
+    construct the output path for the Excel file containing IDs.
+    - If `df` is a relative path or string → convert it to an absolute path
+      using `data_dir_path`.
+    - If `df` is a DataFrame → return None (no base file).
+    
+    Returns:
+    Path to the output file or None if not applicable.
+        """
+    if not isinstance(df, (str, Path)):
+        return None
+
+    input_path = Path(df)
+    if not input_path.is_absolute():
+        input_path = data_dir_path / input_path
+
+    return input_path.with_name(
+        f"{input_path.stem}{suffix}{input_path.suffix}"
+    )
 
 def _load_df(df_or_path: Union[pd.DataFrame, str, Path],
              data_dir: Optional[Path] = None) -> pd.DataFrame:
@@ -62,7 +179,7 @@ def _resolve_account_ids_from_df(
     df = df.copy()
 
     if not bus_id_columns:
-        bus_id_columns = [get_column_name()]  # "BUS ID" by default
+        bus_id_columns = ["BUS ID"]  # "BUS ID" by default
 
     if not any(col in df.columns for col in bus_id_columns):
         raise ValueError(
@@ -72,7 +189,8 @@ def _resolve_account_ids_from_df(
 
     if account_id_column not in df.columns:
         df[account_id_column] = None
-        
+    
+    console = Console()
     pbar = tqdm(
         df.iterrows(),
         total=len(df),
@@ -110,7 +228,15 @@ def _resolve_account_ids_from_df(
         pbar.set_postfix({"BUS ID": bus_id_value})
 
         # Call the original service to obtain the AccountID
-        account_id = get_account_id_by_bus_id(bus_id_value)
+        # account_id = get_account_id_by_bus_id(bus_id_value)
+        resp = get_account_id_by_bus_id(bus_id_value)
+        
+        # Check expired token
+        if _handle_expired_token(resp, bus_id_value, pbar, console):
+            break
+        
+        # Extract the account_id from the response
+        account_id = resp.get("account_id")
 
         # Save in cell
         df.at[idx, account_id_column] = account_id
@@ -158,19 +284,12 @@ def call_deactivate_accounts(
     # 2) Resolve accountids (if needed)
     df_with_ids = _resolve_account_ids_from_df(df_loaded, bus_id_columns=bus_id_columns)
     
-    ids_output = None
-    if isinstance(df, (str, Path)):
-        input_path = Path(df)
-        if not input_path.is_absolute():
-            input_path = data_dir_path / input_path
+    ids_output = _build_ids_output_path(df, data_dir_path)
 
-        ids_output = input_path.with_name(
-            f"{input_path.stem}_with_ids{input_path.suffix}"
-        )
-
+    if ids_output is not None:
         df_with_ids.to_excel(ids_output, index=False)
-        logger.info("Saved DataFrame with resolved account IDs to %s", ids_output)
-
+        logger.info("Saved DataFrame with resolved-account IDs to: %s", ids_output)
+            
     results: List[Dict[str, Any]] = []
     
     console = Console()
@@ -225,7 +344,7 @@ def call_deactivate_accounts(
                     bus_id_value = str(row[col]).strip()
                     break
         else:
-            default_col = get_column_name()
+            default_col = "BUS ID"
             if default_col in df_with_ids.columns and pd.notna(row[default_col]):
                 bus_id_value = str(row[default_col]).strip()
 
@@ -239,49 +358,27 @@ def call_deactivate_accounts(
             performed_by=performed_by,
         )
 
-        error_msg = str(resp.get("error") or "")
-
         results.append({
             "bus_id": bus_id_value,
             **resp,
         })
 
         # Special handling of expired token
-        if "401" in error_msg:
-            pbar.set_postfix({"BUS ID": bus_id_value, "status": "❌ TOKEN EXPIRED"})
-            pbar.close()
-
-            # Display important message in red with RICH
-            console.print(
-                Text(f"[STOPPED] Token expired at BUS ID: {bus_id_value}", style="bold red")
-            )
+        if _append_result_and_handle_token(results, resp, bus_id_value, pbar, console):
             break
 
     pbar.close()    
     results_df = pd.DataFrame(results)
 
     # 4) Save results
-    if output_path is None:
-        output_path = DEFAULT_OUTPUT_PATH
-    else:
-        output_path = Path(output_path)
-        if not output_path.is_absolute():
-            # always save under dataverse_apis/data, using only the filename
-            output_path = DEFAULT_DATA_DIR / output_path.name
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    results_df.to_excel(output_path, index=False)
-
-    # Time to end
-    end_time = datetime.now()
-    duration_sec = (end_time - start_time).total_seconds()
-    logger.info(
-        "call_deactivate_accounts finished at %s (duration: %.2f seconds)",
-        end_time.isoformat(timespec="seconds"),
-        duration_sec,
+    return _save_results_with_logging(
+        results_df=results_df,
+        output_path=Path(output_path) if output_path else None,
+        default_output_path=DEFAULT_OUTPUT_PATH,
+        start_time=start_time,
+        task_name="call_deactivate_accounts",
+        logger=logger,
     )
-
-    return results_df
 
 def call_reactivate_accounts(
     df: Union[pd.DataFrame, str, Path],
@@ -300,23 +397,38 @@ def call_reactivate_accounts(
     """
     if df is None:
         raise ValueError("Input argument `df` is None.")
+    
+    # Start time
+    start_time = datetime.now()
+    logger.info(
+        "call_reactivate_accounts started at %s",
+        start_time.isoformat(timespec="seconds"),
+    )
 
+    # 1) Load DataFrame (if it comes as a file)
     data_dir_path = Path(data_dir) if data_dir else DEFAULT_DATA_DIR
     df_loaded = _load_df(df, data_dir=data_dir_path)
 
     if df_loaded.empty:
         raise ValueError("Input DataFrame is empty after loading.")
 
-    # 1) Resolve accountid (if necessary)
+    # 2) Resolve accountid (if necessary)
     df_with_ids = _resolve_account_ids_from_df(
         df_loaded,
         bus_id_columns=bus_id_columns,
         account_id_column=DEFAULT_ACCOUNT_ID_COLUMN,
     )
+    
+    ids_output = _build_ids_output_path(df, data_dir_path)
+
+    if ids_output is not None:
+        df_with_ids.to_excel(ids_output, index=False)
+        logger.info("Saved DataFrame with resolved-account IDs to: %s", ids_output)
 
     results: List[Dict[str, Any]] = []
     console = Console()
 
+    # 3) Iterate with tqdm
     pbar = tqdm(
         df_with_ids.iterrows(),
         total=len(df_with_ids),
@@ -336,7 +448,7 @@ def call_reactivate_accounts(
                     bus_id_value = str(row[col]).strip()
                     break
         else:
-            default_col = get_column_name()
+            default_col = "BUS ID"
             if default_col in df_with_ids.columns and pd.notna(row[default_col]):
                 bus_id_value = str(row[default_col]).strip()
 
@@ -370,41 +482,20 @@ def call_reactivate_accounts(
             "bus_id": bus_id_value,
             **resp,
         })
-        
-        error_msg = str(resp.get("error") or "")
-        
+                
         # Special handling of expired token
-        if "401" in error_msg:
-            pbar.set_postfix({"BUS ID": bus_id_value, "status": "❌ TOKEN EXPIRED"})
-            pbar.close()
-
-            # Display important message in red with RICH
-            console.print(
-                Text(f"[STOPPED] Token expired at BUS ID: {bus_id_value}", style="bold red")
-            )
+        if _append_result_and_handle_token(results, resp, bus_id_value, pbar, console):
             break
 
     pbar.close()
-
     results_df = pd.DataFrame(results)
 
-    # 2) Determine output folder based on input
-    if isinstance(df, (str, Path)):
-        input_path = Path(df)
-        if not input_path.is_absolute():
-            input_path = data_dir_path / input_path
-        output_folder = input_path.parent
-    else:
-        output_folder = data_dir_path
-
-    # Filename
-    if output_path is None:
-        output_filename = DEFAULT_REACTIVATION_OUTPUT_NAME
-    else:
-        output_filename = Path(output_path).name
-
-    final_output = output_folder / output_filename
-    final_output.parent.mkdir(parents=True, exist_ok=True)
-    results_df.to_excel(final_output, index=False)
-
-    return results_df
+    # 4) Save results
+    return _save_results_with_logging(
+        results_df=results_df,
+        output_path=Path(output_path) if output_path else None,
+        default_output_path=DEFAULT_OUTPUT_PATH,
+        start_time=start_time,
+        task_name="call_deactivate_accounts",
+        logger=logger,
+    )

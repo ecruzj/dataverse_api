@@ -56,6 +56,7 @@ def call_dataverse(endpoint: str, method: str = "GET", data: dict = None, header
 
     # Mapping methods to request functions
     method = method.upper()
+    response = None
     try:
         if method == "GET":
             response = requests.get(full_url, headers=headers)
@@ -71,9 +72,57 @@ def call_dataverse(endpoint: str, method: str = "GET", data: dict = None, header
             raise ValueError(f"HTTP method not supported: {method}")
         
         response.raise_for_status()
-        return response.json() if response.content else {"status": "success", "code": response.status_code}
+        # return response.json() if response.content else {"status": "success", "code": response.status_code}
+        if response.content:
+            try:
+                json_payload = response.json()
+            except ValueError:
+                json_payload = {"raw": response.text}
+        else:
+            json_payload = {}
 
-    except requests.exceptions.HTTPError as err:
-        raise Exception(f"Error HTTP: {response.status_code} - {response.text}") from err
+        return {
+            "status": "success",
+            "status_code": response.status_code,
+            **json_payload,
+        }
+    except requests.exceptions.HTTPError:
+        if response is None:
+            return {
+                "status": "error",
+                "status_code": None,
+                "error": "Request failed before response was received",
+                "details": None,
+            }
+        status = response.status_code
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_payload = response.text
+            error_payload = response.text
+
+        # --- SPECIAL CASE: EXPIRED TOKEN / 401---
+        if status == 401:
+            return {
+                "status": "error",
+                "status_code": status,
+                "error": "401 Unauthorized: access token expired or invalid",
+                "details": error_payload,
+            }
+
+        # Other HTTP errors
+        return {
+            "status": "error",
+            "status_code": status,
+            "error": f"HTTP {status}",
+            "details": error_payload,
+        }
+
     except Exception as e:
-        raise Exception(f"Unexpected error: {e}") from e
+        # Unexpected errors (network, etc.)
+        return {
+            "status": "error",
+            "status_code": None,
+            "error": f"Unexpected error: {e}",
+            "details": None,
+        }

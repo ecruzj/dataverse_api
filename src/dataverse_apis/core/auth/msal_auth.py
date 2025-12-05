@@ -1,7 +1,6 @@
 import os
-# import sys
-# from pathlib import Path
-# from dotenv import load_dotenv, set_key
+import time
+from datetime import datetime, timedelta
 from ..services.env_loader import get_env_variable_value
 from msal import PublicClientApplication, TokenCache # msal Microsoft Authentication Library
 from ..logging.logging_conf import get_logger
@@ -109,7 +108,7 @@ def get_access_token_with_msal_default():
     # dump_msal_config() # just for debugging purposes
     global _cached_token
     
-    log.info("Getting access token with MSAL default method...")
+    # log.info("Getting access token with MSAL default method...")
     
     # If there is already a valid token in the global cache, we return it.
     if _cached_token and "access_token" in _cached_token:
@@ -127,6 +126,7 @@ def get_access_token_with_msal_default():
         result = app.acquire_token_silent(scopes, account=chosen)
         if result and "access_token" in result:
             _cached_token = result
+            log_token_expiration(result)
             return result["access_token"]
 
     # 2. No valid token, open browser
@@ -135,6 +135,29 @@ def get_access_token_with_msal_default():
     result = app.acquire_token_interactive(scopes=scopes)
     if "access_token" in result:
         _cached_token = result
+        log_token_expiration(result) 
         return result["access_token"]
     else:
         raise Exception(f"Error getting token: {result.get('error_description')}")
+    
+def log_token_expiration(result):
+    """
+    Receive the result object returned by MSAL (with expires_in)
+    and log the exact expiration time of the token.
+    """
+
+    expires_in = result.get("expires_in")     # seconds
+    ext_expires_in = result.get("ext_expires_in") 
+
+    if not expires_in:
+        log.info("Token expiration unknown (expires_in not provided by MSAL).")
+        return
+
+    now = datetime.now()
+    expiration_time = now + timedelta(seconds=int(expires_in))
+
+    log.info(
+        f"Token expires in {expires_in} seconds "
+        f"({expires_in/60:.1f} minutes)."
+    )
+    log.info(f"Token will expire at: {expiration_time.strftime('%Y-%m-%d %H:%M:%S')}")

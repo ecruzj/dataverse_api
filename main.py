@@ -11,34 +11,40 @@ from src.dataverse_apis.tasks.account.account_tasks import call_deactivate_accou
 def main():
     setup_logging(app_name="dataverse_apis")  # Logging setup
     log = get_logger(__name__)
-    log.info("Reactivation script started")
     
-    results_df = call_reactivate_accounts(
-        df="accounts_to_reactivate_ICPS.xlsx",  # ya con BUS ID + accountid
+    ## REACTIVATE ACCOUNTS START
+    # log.info("Reactivation script started")
+    
+    # results_df = call_reactivate_accounts(
+    #     df="accounts_to_reactivate_ICPS.xlsx",  # ya con BUS ID + accountid
+    #     bus_id_columns=["BUS ID"],
+    #     # note_id_column="annotationid",  # si decides extraer esto antes
+    #     output_path="reactivated_accounts_results.xlsx",
+    # )
+
+    # print("Done. Reactivation results saved.")
+    # print(results_df.head())
+    
+    ## REACTIVATE ACCOUNTS END
+    
+    ## DEACTIVATE ACCOUNTS START
+    log.info("Deactivation script started")
+    today_str = date.today().strftime("%B %d, %Y")
+    reason = (
+        f"This account was deactivated on <strong>{today_str}</strong> due to the absence of any associated entities."
+        "The data on this account is considered outdated and no longer relevant for active operations"
+    )
+    results_df = call_deactivate_accounts(
+        df="accounts_to_deactivate_ICPS.xlsx",
         bus_id_columns=["BUS ID"],
-        # note_id_column="annotationid",  # si decides extraer esto antes
-        output_path="reactivated_accounts_results.xlsx",
+        reason_text= reason,
+        performed_by="<strong>Josue Cruz with Dataverse_APIs (Batch #3)</strong><br>"
+            "Supervised by: <strong>Trung Quach</strong> and <strong>Leila Rigor</strong><br>",
+        output_path="data/deactivated_accounts_results.xlsx",
     )
 
-    print("Done. Reactivation results saved.")
-    print(results_df.head())
-    ## DEACTIVATE ACCOUNTS START
-    # today_str = date.today().strftime("%B %d, %Y")
-    # reason = (
-    #     f"This account was deactivated on <strong>{today_str}</strong> due to the absence of any associated entities."
-    #     "The data on this account is considered outdated and no longer relevant for active operations"
-    # )
-    # results_df = call_deactivate_accounts(
-    #     df="accounts_to_deactivate_ICPS_with_ids.xlsx",
-    #     bus_id_columns=["BUS ID"],
-    #     reason_text= reason,
-    #     performed_by="<strong>Josue Cruz with Dataverse_APIs (Batch #3)</strong><br>"
-    #         "Supervised by: <strong>Trung Quach</strong> and <strong>Leila Rigor</strong><br>",
-    #     output_path="data/deactivated_accounts_results.xlsx",
-    # )
-
-    # print("Done. Results saved to data/deactivated_accounts_results.xlsx")
-    # print(results_df.head())    
+    print("Done. Results saved to data/deactivated_accounts_results.xlsx")
+    print(results_df.head())    
     ## DEACTIVATE ACCOUNTS END
     
     # accounts = fetch_accounts_from_ICPS()
