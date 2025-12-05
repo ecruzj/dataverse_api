@@ -1,6 +1,7 @@
 # dataverse_apis/features/account/account_operations.py
 from __future__ import annotations
 from typing import Optional, Dict, Any
+from src.dataverse_apis.features.dataverse_helper.dataverse_helper import validate_dataverse_error_message
 from src.dataverse_apis.core.services.dataverse_client import call_dataverse
 from src.dataverse_apis.features.timeline.note_operations import create_account_note, delete_note_by_id, find_last_deactivation_note_for_account
 
@@ -39,12 +40,18 @@ def deactivate_account_with_note(
         "account_id": account_id,
         "deactivated": False,
         "note_created": False,
+        "status_code": None,
         "error": None,
     }
 
     try:
         # 1) Deactivate your Dataverse account
         deactivate_resp = deactivate_account(account_id=account_id)
+        validate_dataverse_error_message(result, deactivate_resp, "deactivate_response")
+        
+        if deactivate_resp.get("status") == "error":
+            return result  # Early return on error
+        
         result["deactivated"] = True
         result["deactivate_response"] = deactivate_resp
 
@@ -65,6 +72,12 @@ def deactivate_account_with_note(
             subject="Account Deactivated",
             body_text=note_body,
         )
+        
+        validate_dataverse_error_message(result, deactivate_resp, "note_response")
+        
+        if note_resp.get("status") == "error":
+            return result  # Early return on error
+        
         result["note_created"] = True
         result["note_response"] = note_resp
 
@@ -106,6 +119,11 @@ def reactivate_account_and_delete_note(
     try:
         # 1) Reactivate account
         reactivate_resp = reactivate_account(account_id)
+        validate_dataverse_error_message(result, reactivate_resp, "reactive_response")
+        
+        if reactivate_resp.get("status") == "error":
+            return result  # Early return on error
+        
         result["reactivated"] = True
         result["reactivate_response"] = reactivate_resp
 
@@ -119,10 +137,48 @@ def reactivate_account_and_delete_note(
 
         if target_note_id:
             delete_resp = delete_note_by_id(target_note_id)
+            validate_dataverse_error_message(result, delete_resp, "delete_note_response")
+            
+            if delete_resp.get("status") == "error":
+                return result  # Early return on error
+            
             result["note_deleted"] = True
             result["note_delete_response"] = delete_resp
         else:
             result["note_deleted"] = False  # Not found, it's not a fatal error
+
+    except Exception as exc:
+        result["error"] = str(exc)
+
+    return result
+
+def get_account_id_by_bus_id(bus_id: str) -> Dict[str, Any]:
+    """
+    Searches for an account by BUS ID (account number) and returns a dictionary consistent with the other account operations.
+    """
+    endpoint = (
+        "accounts?"
+        f"$select=accountid,accountnumber"
+        f"&$filter=accountnumber eq '{bus_id}'"
+    )
+
+    result: Dict[str, Any] = {
+        "bus_id": bus_id,
+        "account_id": None,
+        "found": False,
+        "status_code": None,
+        "error": None,
+    }
+
+    try:
+        resp = call_dataverse(endpoint, method="GET")
+        validate_dataverse_error_message(result, resp, "account_id_response")
+        
+        records = resp.get("value", [])
+        if records:
+            account_id = records[0].get("accountid")
+            result["account_id"] = account_id
+            result["found"] = True
 
     except Exception as exc:
         result["error"] = str(exc)
